@@ -25,6 +25,12 @@ if TYPE_CHECKING:
         InterpEngineReplacementModel,
     )
 
+#: A score hook gathers the gradient to [batch, active features, d_model] before contracting it.
+#: Past this many elements it contracts in chunks instead: MPS refuses any tensor over INT_MAX
+#: elements, and on every device a dense layer -- Qwen3-4B's transcoders reach 30k active features
+#: on a four-token prompt -- would otherwise allocate gigabytes for one contraction.
+SCORE_CHUNK_ELEMENTS = 2**30
+
 
 class AttributionContext:
     """Manage hooks for computing attribution rows.
@@ -95,13 +101,26 @@ class AttributionContext:
         tensor cannot keep the whole context alive.
         """
         proxy = weakref.proxy(self)
+        pattern = "batch position d_model, position d_model -> position batch"
 
         def _hook_fn(grads: torch.Tensor) -> None:
-            proxy._batch_buffer[write_index] += einsum(  # type: ignore[index]
-                grads.to(output_vecs.dtype)[read_index],
-                output_vecs,
-                "batch position d_model, position d_model -> position batch",
-            )
+            grads = grads.to(output_vecs.dtype)
+            rows = output_vecs.shape[0]
+            per_row = grads.shape[0] * grads.shape[-1]
+            if rows * per_row <= SCORE_CHUNK_ELEMENTS or not isinstance(read_index, tuple):
+                proxy._batch_buffer[write_index] += einsum(grads[read_index], output_vecs, pattern)  # type: ignore[index]
+                return
+            # The gather `grads[:, positions]` would be [batch, rows, d_model], one row per active
+            # feature of this layer: contracted in chunks of rows instead, so it is never formed.
+            positions = read_index[1]
+            step = max(1, SCORE_CHUNK_ELEMENTS // per_row)
+            scores = torch.empty(rows, grads.shape[0], dtype=grads.dtype, device=grads.device)
+            for start in range(0, rows, step):
+                stop = start + step
+                scores[start:stop] = einsum(
+                    grads[:, positions[start:stop]], output_vecs[start:stop], pattern
+                )
+            proxy._batch_buffer[write_index] += scores  # type: ignore[index]
 
         return _hook_fn
 
