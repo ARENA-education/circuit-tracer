@@ -175,7 +175,7 @@ class CrossLayerTranscoder(torch.nn.Module):
 
     def encode_layer(self, x, layer_id, apply_activation_function=True):
         W_enc_layer = self._get_encoder_weights(layer_id)
-        features = torch.einsum("...d,fd->...f", x, W_enc_layer) + self.b_enc[layer_id]
+        features = F.linear(x, W_enc_layer) + self.b_enc[layer_id]
         if not apply_activation_function:
             return features
 
@@ -200,9 +200,11 @@ class CrossLayerTranscoder(torch.nn.Module):
 
         for layer_id in range(self.n_layers):
             W_enc_layer = self._get_encoder_weights(layer_id)
-            layer_features = (
-                torch.einsum("bd,fd->bf", x[layer_id], W_enc_layer) + self.b_enc[layer_id]
-            )
+            # `F.linear`, not an einsum: `W_enc_layer` is a view into the stacked encoder, whose
+            # storage passes INT_MAX elements on a 2.5M-feature CLT, and MPS refuses an einsum on
+            # such a view while it takes the same contraction as a linear. The bias is added
+            # separately so the rounding matches `encode`, which the tests hold this to.
+            layer_features = F.linear(x[layer_id], W_enc_layer) + self.b_enc[layer_id]
 
             layer_features = self.apply_activation_function(layer_id, layer_features)
 
