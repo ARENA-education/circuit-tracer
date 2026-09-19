@@ -13,21 +13,9 @@ from circuit_tracer.graph import compute_node_influence
 Feature = namedtuple("Feature", ["layer", "pos", "feature_idx"])
 
 
-def get_unembed_vecs(model, token_ids: list[int], backend: str | None = None) -> list[torch.Tensor]:
-    """Extract unembedding row vectors for the given token IDs.
-
-    Args:
-        model: A ``ReplacementModel`` instance.
-        token_ids: Vocabulary indices whose unembed rows to extract.
-        backend: Ignored, and kept only so the demo notebook and its mirrored test keep calling
-            this unchanged. Every backend now exposes ``unembed_weight`` as ``(d_vocab, d_model)``,
-            so there is no longer an orientation to pick between.
-
-    Returns:
-        List of 1-D tensors, one per token ID, each of shape ``(d_model,)``.
-    """
-    unembed = model.unembed_weight
-    return [unembed[tid] for tid in token_ids]
+def get_unembed_vecs(model, token_ids: list[int]) -> list[torch.Tensor]:
+    """Return the ``(d_model,)`` unembedding row of each token ID."""
+    return [model.unembed_weight[tid] for tid in token_ids]
 
 
 def cleanup_cuda() -> None:

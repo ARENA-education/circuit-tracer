@@ -40,10 +40,6 @@ class ReplacementModel:
     backend-specific attribute off the result (``model.cfg``, which only TransformerLens has) is a
     type error at every call site, since one member of the union is a plain ``nn.Module`` whose
     ``__getattr__`` returns ``Tensor | Module``.
-
-    The embedding matrices are deliberately *not* backend-specific: every backend exposes
-    ``embed_weight`` and ``unembed_weight`` as ``(d_vocab, d_model)``, so code that only needs those
-    can stay generic. See ``tests/test_embedding_accessors.py``.
     """
 
     @classmethod

@@ -10,7 +10,6 @@ freeze that silently stopped holding.
 """
 
 import gc
-import math
 
 import pytest
 import torch
@@ -52,10 +51,8 @@ ABLATE_TEXAS = [(layer, pos, feature, -2.0) for layer, pos, feature in TEXAS_SUP
 GENERATE_PROMPT = "Fait: Michael Jordan joue au"
 FRENCH_TO_SPANISH = [(20, slice(6, None), 1454, 0.0), (20, slice(6, None), 341, 272.0)]
 
-# The attribution_targets demo's logit-difference target. Worth its own case because it is the one
-# notebook path that reads the unembedding matrix directly, and the two backends store it in
-# opposite orientations -- so a wrong branch in `get_unembed_vecs` would attribute to a direction
-# assembled out of the wrong rows without failing anywhere else.
+# The attribution_targets demo's logit-difference target: the one notebook path that reads the
+# unembedding matrix directly.
 TARGET_TOKENS = ("▁Austin", "▁Dallas")
 
 
@@ -96,7 +93,7 @@ def _collect(backend: Backend) -> dict[str, torch.Tensor | str]:
     tokenizer = model.tokenizer
     assert tokenizer is not None
     target_ids = [tokenizer.encode(token, add_special_tokens=False)[-1] for token in TARGET_TOKENS]
-    vec_x, vec_y = get_unembed_vecs(model, target_ids, backend)
+    vec_x, vec_y = get_unembed_vecs(model, target_ids)
     direction = vec_x - vec_y
     with model.zero_softcap():
         custom_graph = attribute(
@@ -186,20 +183,9 @@ def test_attribution_context_consistency(tl, ie):
     _assert_close(ie["encoder_vecs"], tl["encoder_vecs"], "Encoder vectors", atol=1e-4)
 
 
-def test_token_vectors_differ_only_by_the_embedding_normalizer(tl, ie):
-    """Pins the one convention the backends genuinely do not share.
-
-    transformerlens folds Gemma's ``sqrt(d_model)`` embedding normalizer into ``W_E``; Hugging Face
-    applies it as a separate multiply after ``embed_tokens``, and both interp_engine and nnsight
-    report the raw embedding row. interp_engine reads its token gradient on the pre-multiply tensor,
-    so the factor cancels and token attributions still match -- which
-    :func:`test_attribution_graph_consistency` checks. Asserting the exact factor here keeps that
-    reasoning honest: if the normalizer ever moved, this fails loudly instead of the graph drifting.
-    """
-    d_model = tl["token_vectors"].shape[-1]
-    _assert_close(
-        ie["token_vectors"] * math.sqrt(d_model), tl["token_vectors"], "Token vectors", atol=1e-3
-    )
+def test_token_vectors_agree(tl, ie):
+    """Both report the embedding as it enters the residual stream, Gemma's normalizer included."""
+    _assert_close(ie["token_vectors"], tl["token_vectors"], "Token vectors", atol=1e-3)
 
 
 def test_attribution_graph_consistency(tl, ie):

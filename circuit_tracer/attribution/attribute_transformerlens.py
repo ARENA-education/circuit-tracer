@@ -142,7 +142,7 @@ def _run_attribution(
     logger.info(f"Precomputation completed in {time.time() - phase_start:.2f}s")
     logger.info(f"Found {ctx.activation_matrix._nnz()} active features")
 
-    if offload:
+    if offload and not model.skip_transcoder:
         offload_handles += offload_modules(model.transcoders, offload)
 
     # Phase 1: forward pass
@@ -155,6 +155,8 @@ def _run_attribution(
 
     if offload:
         offload_handles += offload_modules([block.mlp for block in model.blocks], offload)
+        if model.skip_transcoder:
+            offload_handles += offload_modules(model.transcoders, offload)
 
     # Phase 2: build input vector list
     logger.info("Phase 2: Building input vectors")

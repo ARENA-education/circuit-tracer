@@ -65,13 +65,8 @@ class TransformerLensReplacementModel(HookedTransformer):
     scan_name: str | list[str] | None
     backend: Literal["transformerlens"]
 
-    # The two weight accessors every backend shares, so that code holding a `ReplacementModel` can
-    # ask for the embedding matrices without first asking which backend it holds. Both are
-    # `[d_vocab, d_model]`, one row per token: that is what `embed_weight` already means on all
-    # three, and `unembed_weight` on the other two, so `W_U` is the odd one out and is transposed
-    # here rather than the convention bending around it. TransformerLens' own `W_E`/`W_U` stay
-    # exactly as they are for code that wants them in TL's terms.
-
+    # Every backend exposes both matrices as `[d_vocab, d_model]`. TL stores `W_U` transposed, so
+    # `unembed_weight` transposes it back; `W_E` and `W_U` themselves are unchanged.
     @property
     def embed_weight(self) -> torch.Tensor:
         return self.W_E

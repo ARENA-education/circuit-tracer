@@ -1,9 +1,4 @@
-"""The intervention tuple, and the one rewriting of it that every backend needs.
-
-Both definitions below existed as byte-identical copies in the TransformerLens and nnsight
-backends. A third backend would have made a third copy of a rule about what user input means,
-which is the kind of thing that drifts silently.
-"""
+"""The intervention tuple, and the one rewriting of it that every backend needs."""
 
 from typing import Sequence
 

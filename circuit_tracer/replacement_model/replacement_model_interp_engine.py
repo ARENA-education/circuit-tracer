@@ -63,6 +63,10 @@ if TYPE_CHECKING:
 
 BACKEND = "interp_engine"
 
+# Architectures whose freezes `tests/test_interp_engine_freezes.py` checks. Loading one of these
+# skips `_verify_freezes`; any other architecture is checked at load.
+VERIFIED_MODEL_TYPES = frozenset({"gemma2", "gemma3_text", "llama", "qwen3"})
+
 # Attributes the hooked code looks for, to let a caller see or replace a tensor that is a local
 # variable inside some module's forward rather than any module's output. A module hook cannot reach
 # these, which is the whole reason the other two backends need a framework to get at them.
@@ -653,7 +657,8 @@ class InterpEngineReplacementModel(nn.Module):
         self._install_feature_hooks()
         self._install_embed_gradient()
         self._clear_taps()
-        self._verify_freezes()
+        if self.hf_model.config.model_type not in VERIFIED_MODEL_TYPES:
+            self._verify_freezes()
 
     def _clear_taps(self) -> None:
         """Give every tappable module its tap attribute, empty.
@@ -876,25 +881,22 @@ class InterpEngineReplacementModel(nn.Module):
             self._handles.append(norm.register_forward_hook(_freeze_scale(norm, self._audit)))
 
     def _install_embed_gradient(self) -> None:
-        """Make the token embeddings a gradient source, and keep the tensor for attribution."""
-        embed, _ = self.engine.resolve_point("embeddings")
+        """Make the residual entering layer 0 a gradient source; ``token_vectors`` reads it too."""
 
-        def hook(_module, _args, output):
-            tensor = _hidden(output)
-            # Every parameter is frozen, so this tensor is a graph leaf and can be turned into
-            # one. It is where token-embedding attributions are read from.
+        def hook(_module, args, kwargs):
+            tensor = args[0] if args else kwargs["hidden_states"]
             if not tensor.requires_grad:
                 tensor.requires_grad_(True)
             self._embed_tensor = tensor
-            return output
 
-        self._handles.append(embed.register_forward_hook(hook))
+        self._handles.append(self.blocks[0].register_forward_pre_hook(hook, with_kwargs=True))
 
     def _verify_freezes(self) -> None:
         """Check on real tensors that both freezes do what they claim.
 
-        A short forward pass is cheap next to loading the model, and a freeze that silently does
-        not hold produces an attribution graph that looks entirely reasonable.
+        Runs at load for architectures outside `VERIFIED_MODEL_TYPES`, and in the test that
+        keeps that set honest. A freeze that silently does not hold produces a graph that looks
+        entirely reasonable.
         """
         attn_modules = [self.arch.attn_module(layer) for layer in range(self.n_layers)]
         for module in attn_modules:
@@ -1051,13 +1053,8 @@ class InterpEngineReplacementModel(nn.Module):
 
         error_vectors = feature_out - attribution_data["reconstruction"]
         error_vectors[:, self.zero_positions] = 0
-        # Raw embedding rows, matching the NNSight backend. On Gemma these are sqrt(d_model) times
-        # smaller than TransformerLens reports, because TL folds that normalizer into `W_E` while HF
-        # applies it as a separate multiply after `embed_tokens`. The gradient is read on the
-        # pre-multiply tensor, so the factor cancels and token attributions still agree with TL to
-        # float precision; only this public vector differs, and it differs the same way NNSight's
-        # already does.
-        token_vectors = self.embed_weight[tokens].detach()
+        # The residual entering layer 0, where the token gradient is read; same as TL's W_E rows.
+        token_vectors = self.embed_tensor[0].detach()
 
         return AttributionContext(
             activation_matrix=attribution_data["activation_matrix"],

@@ -1,10 +1,4 @@
-"""Prompt -> token ids, shared by every backend.
-
-Attribution compares graphs across backends, so the backends have to agree on the token
-sequence before anything else can be compared. This lived as a byte-identical copy in each
-``ReplacementModel`` implementation; it is one function here so a third backend does not become
-a third copy that can drift.
-"""
+"""Prompt -> token ids, shared by every backend."""
 
 import warnings
 

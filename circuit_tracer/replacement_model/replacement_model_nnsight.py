@@ -50,8 +50,6 @@ class NNSightReplacementModel(TransformersModel):
     pre_logit_location: nn.Module  # type: ignore
     embed_loc: nn.Module
     unembed_loc: nn.Module
-    # Assigned in __init__ from the mapping config; declared here because they are part of the
-    # accessor every backend shares, `(d_vocab, d_model)` on all three.
     embed_weight: torch.Tensor
     unembed_weight: torch.Tensor
     skip_transcoder: bool
@@ -262,7 +260,7 @@ class NNSightReplacementModel(TransformersModel):
 
     def configure_gradient_flow(self, tracer):
         with tracer.invoke():
-            self.embed_location.output.requires_grad = True  # type: ignore
+            self.resid_pre_location.input.requires_grad = True  # type: ignore
 
         with tracer.invoke():
             for freeze_loc in self.attention_locs:
@@ -455,6 +453,7 @@ class NNSightReplacementModel(TransformersModel):
         transcoders = self.transcoders
 
         with self.trace(tokens):
+            resid_pre = save(self.resid_pre_location.input)  # type: ignore
             mlp_in_cache, mlp_out_cache = [], []
             for feature_input_loc, feature_output_loc in zip(
                 self.feature_input_locs, self.feature_output_locs
@@ -479,9 +478,8 @@ class NNSightReplacementModel(TransformersModel):
         error_vectors = mlp_out_cache - attribution_data["reconstruction"]
 
         error_vectors[:, self.zero_positions] = 0
-        token_vectors = self.embed_weight[  # type: ignore
-            tokens
-        ].detach()  # (n_pos, d_model)  # type: ignore
+        # The residual entering layer 0, where the token gradient is read; same as TL's W_E rows.
+        token_vectors = resid_pre.reshape(-1, resid_pre.shape[-1]).detach()  # type: ignore
 
         return AttributionContext(
             activation_matrix=attribution_data["activation_matrix"],
@@ -984,3 +982,8 @@ class NNSightReplacementModel(TransformersModel):
     def embed_location(self) -> nn.Module:
         """Dynamically resolve the embed hook location."""
         return self._resolve_attr(self, self._embed_location)  # type: ignore
+
+    @property
+    def resid_pre_location(self) -> nn.Module:
+        """The first decoder layer; its input is the residual that token attributions read."""
+        return getattr(self.pre_logit_location, "layers")[0]
