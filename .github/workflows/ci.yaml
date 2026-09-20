@@ -9,7 +9,8 @@ on:
       ground_truth_sets:
         description: >-
           Transcoder sets for the ground-truth jobs. "default" is the two gemma-scope sets on 16 GB
-          cards. "all" adds the CLT (160 GiB) and Qwen3-4B (57 GiB) sets, each on its own 48 GB card.
+          cards. "all" adds the CLT (160 GiB) and Qwen3-4B (57 GiB) sets, each on its own 48 GB
+          card; those also run when a PR opens and on merge to main.
         type: choice
         default: default
         options: [default, all]
@@ -91,10 +92,14 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: .venv/bin/python -m pytest tests/test_graph_ground_truth.py -k "${{ matrix.case }}" -v -rP --durations=0
 
-  # The `requires_disk` sets, on `workflow_dispatch` with ground_truth_sets=all. Each downloads its
-  # transcoders first, which is most of the time: 160 GiB for the CLT, 57 GiB for Qwen3-4B.
+  # The `requires_disk` sets. Each downloads its transcoders first, which is most of the time:
+  # 160 GiB for the CLT, 57 GiB for Qwen3-4B. So they run when a PR opens, on merge to main, and on
+  # `workflow_dispatch` with ground_truth_sets=all, not on every push to a PR.
   ground-truth-opt-in:
-    if: github.event_name == 'workflow_dispatch' && inputs.ground_truth_sets == 'all'
+    if: >-
+      github.event_name == 'push'
+      || github.event.action == 'opened'
+      || (github.event_name == 'workflow_dispatch' && inputs.ground_truth_sets == 'all')
     strategy:
       fail-fast: false
       matrix:
