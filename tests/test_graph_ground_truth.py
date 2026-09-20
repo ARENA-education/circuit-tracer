@@ -1,29 +1,34 @@
 """A graph built here agrees with the one production Neuronpedia built from the same request.
 
-The fixtures under ``fixtures/graphs/`` are graphs ``POST https://www.neuronpedia.org/api/graph/generate``
-returned for the prompt ``123``, one per transcoder set Neuronpedia serves, pruned as hard as that API
-allows so they stay small. Each records the model, the transcoder set and every generation and
-pruning parameter in its ``metadata``, and the test builds a graph from exactly those, on each
-backend, through :func:`circuit_tracer.utils.create_graph_files.build_graph_model` -- the same path
-as ``create_graph_files``. What is compared is the wire format the frontend reads, node ids and all,
-against a graph the ``interp_engine`` backend built on production's CUDA card. For ``transformerlens``
-and ``nnsight`` that makes it a cross-backend check on that format too.
+The fixtures under ``fixtures/graphs/`` are graphs for the prompt ``123``, pruned hard so they stay
+small. Three are what ``POST https://www.neuronpedia.org/api/graph/generate`` returned, one per
+transcoder set Neuronpedia serves, built by the ``interp_engine`` backend on production's CUDA card.
+The gemma-3-1b one was built here by the ``nnsight`` backend on an RTX 5090, since Neuronpedia does
+not serve that set: it is ``build_graph_model`` on ``attribute`` with the settings in its metadata,
+plus the ``info``, ``generation_settings`` and ``pruning_settings`` blocks the API adds. Each fixture
+records the model, the transcoder set and every generation and pruning parameter in its
+``metadata``, and the test builds a graph from exactly those, on each backend, through
+:func:`circuit_tracer.utils.create_graph_files.build_graph_model` -- the same path as
+``create_graph_files``. What is compared is the wire format the frontend reads, node ids and all,
+so for the backends that did not build the fixture it is a cross-backend check on that format too.
 
 Agreement is measured rather than asserted exact. Two bfloat16 attributions do not reproduce bit for
 bit across devices or backends, and pruning turns a small difference in influence at the threshold
 into a node present on one side and absent on the other. The tolerances below leave room over what
 runs against production showed. On an RTX 5090, all three backends on the gemma-scope set: Jaccard
 0.97 to 1.0, activations within 0.5% at the median and 2% at worst, influence within 0.006, 97% of
-the links shared with weights correlated past 0.9999. On MPS, interp_engine on all three sets:
+the links shared with weights correlated past 0.9999; interp_engine against the nnsight gemma-3-1b
+fixture: Jaccard 0.98, activations within 3%, influence within 0.009, 98% of the links shared with
+weights correlated past 0.9999. On MPS, interp_engine on the three production sets:
 Jaccard 0.92 to 1.0, activations within 0.7% at the median and 11% at worst, influence within
 0.045, edge weights correlated past 0.997.
 
-The gemma-scope case runs wherever there is a GPU: about 13 GB of downloads, and in bfloat16 it
-peaks at 9.1 GiB on transformerlens and ~7 GiB on the other two, so the CI job runs it on a 16 GB
-card. The CLT and Qwen cases are ``requires_disk``: 160 GiB and 57 GiB of transcoders, and their
-resident encoders alone are ~11 GiB and 28 GiB. Opt in with ``-m requires_disk`` and pick with
-``-k``. The self-agreement test at the bottom runs everywhere and keeps the fixtures and the
-comparison honest without weights.
+The two gemma-scope cases run wherever there is a GPU: 13 GB and 3 GB of downloads, and in bfloat16
+the gemma-2-2b one peaks at 9.1 GiB on transformerlens and ~7 GiB on the other two, the gemma-3-1b
+one at ~3 GiB, so the CI job runs each on a 16 GB card. The CLT and Qwen cases are
+``requires_disk``: 160 GiB and 57 GiB of transcoders, and their resident encoders alone are ~11 GiB
+and 28 GiB. Opt in with ``-m requires_disk`` and pick with ``-k``. The self-agreement test at the
+bottom runs everywhere and keeps the fixtures and the comparison honest without weights.
 """
 
 import gc
@@ -55,23 +60,28 @@ class Case:
     #: Skip on a smaller card. Below the card's nominal size, since ``total_memory`` reports less:
     #: a 16 GB T4 is 14.7 GiB, a 48 GB L40S is 44.5. The default case peaks at 9.1 GiB.
     min_vram_gib: int
+    #: Backends that can load the model. TransformerLens has no Gemma-3 port that matches HF.
+    backends: tuple[Backend, ...] = BACKENDS
 
 
 CASES = {
     "gemma-2-2b-gemmascope-16k": Case(
         "123-gemma-2-2b-gemmascope-transcoder-16k.json", "google/gemma-2-2b", 12
     ),
+    "gemma-3-1b-gemmascope2-16k": Case(
+        "123-gemma-3-1b-pt-gemmascope2-16k.json",
+        "google/gemma-3-1b-pt",
+        6,
+        backends=("nnsight", "interp_engine"),
+    ),
     "gemma-2-2b-clt-2.5M": Case("123-gemma-2-2b-clt-hp.json", "google/gemma-2-2b", 20),
     "qwen3-4b-transcoders": Case("123-qwen3-4b-transcoder-hp.json", "Qwen/Qwen3-4B", 40),
 }
 FIXTURE_PARAMS = [pytest.param(case, id=name) for name, case in CASES.items()]
-#: The default case downloads ~13 GB; the other two need a big disk and a big card, so they opt in.
+#: The gemma-scope cases download 3 to 13 GB; the other two need a big disk and card, so they opt in.
+DEFAULT_CASES = {"gemma-2-2b-gemmascope-16k", "gemma-3-1b-gemmascope2-16k"}
 CASE_PARAMS = [
-    pytest.param(
-        case,
-        id=name,
-        marks=[] if name == "gemma-2-2b-gemmascope-16k" else [pytest.mark.requires_disk],
-    )
+    pytest.param(case, id=name, marks=[] if name in DEFAULT_CASES else [pytest.mark.requires_disk])
     for name, case in CASES.items()
 ]
 
@@ -199,6 +209,8 @@ def test_each_fixture_agrees_with_itself(case: Case) -> None:
 @pytest.mark.parametrize("case", CASE_PARAMS)
 def test_a_graph_built_here_agrees_with_production(case: Case, backend: Backend) -> None:
     assert DEVICE is not None
+    if backend not in case.backends:
+        pytest.skip(f"{backend} cannot load {case.model}")
     if DEVICE.type == "cuda":
         total_gib = torch.cuda.get_device_properties(0).total_memory / 2**30
         if total_gib < case.min_vram_gib:
