@@ -21,7 +21,10 @@ the links shared with weights correlated past 0.9999; interp_engine against the 
 fixture: Jaccard 0.98, activations within 3%, influence within 0.009, 98% of the links shared with
 weights correlated past 0.9999. On MPS, interp_engine on the three production sets:
 Jaccard 0.92 to 1.0, activations within 0.7% at the median and 11% at worst, influence within
-0.045, edge weights correlated past 0.997.
+0.045, edge weights correlated past 0.997. On the Qwen set the activation error is absolute, not
+relative: every diff is at most 2.0, one bfloat16 step of that model's last-layer residual, which
+is 24% of a feature that activates at 4 and 7% of the graph's median activation. That is why the
+activation check scales small features up to the median before it takes the ratio.
 
 The two gemma-scope cases run wherever there is a GPU: 13 GB and 3 GB of downloads, and in bfloat16
 the gemma-2-2b one peaks at 9.1 GiB on transformerlens and ~7 GiB on the other two, the gemma-3-1b
@@ -166,22 +169,35 @@ def assert_graphs_agree(reference: dict[str, Any], got: dict[str, Any]) -> None:
         f"{len(shared)} shared (jaccard {jaccard:.3f})"
     )
 
-    relative = [
-        abs(ref_features[k]["activation"] - got_features[k]["activation"])
-        / abs(ref_features[k]["activation"])
+    # bfloat16 noise scales with the residual, not the feature: Qwen3-4B's last-layer residual
+    # reaches 418, where one bfloat16 step is 2.0, on features that activate at 4. So a feature's
+    # error is judged against the larger of its own activation and the graph's median activation.
+    scale = statistics.median(abs(n["activation"]) for n in ref_features.values())
+    relative = {
+        k: abs(ref_features[k]["activation"] - got_features[k]["activation"])
+        / max(abs(ref_features[k]["activation"]), scale)
         for k in shared
-        if ref_features[k]["activation"]
-    ]
-    assert statistics.median(relative) <= ACTIVATION_REL_MEDIAN_MAX, (
-        f"activation median rel {statistics.median(relative):.4f}"
+    }
+    assert statistics.median(relative.values()) <= ACTIVATION_REL_MEDIAN_MAX, (
+        f"activation median rel {statistics.median(relative.values()):.4f}"
     )
-    assert max(relative) <= ACTIVATION_REL_MAX, f"activation max rel {max(relative):.4f}"
+    worst = max(relative, key=lambda k: relative[k])
+    assert relative[worst] <= ACTIVATION_REL_MAX, (
+        f"activation max rel {relative[worst]:.4f} at {worst}: "
+        f"{ref_features[worst]['activation']} on production, {got_features[worst]['activation']} here"
+    )
 
-    influence = [abs(ref_features[k]["influence"] - got_features[k]["influence"]) for k in shared]
-    assert statistics.median(influence) <= INFLUENCE_ABS_MEDIAN_MAX, (
-        f"influence median diff {statistics.median(influence):.4f}"
+    influence = {
+        k: abs(ref_features[k]["influence"] - got_features[k]["influence"]) for k in shared
+    }
+    assert statistics.median(influence.values()) <= INFLUENCE_ABS_MEDIAN_MAX, (
+        f"influence median diff {statistics.median(influence.values()):.4f}"
     )
-    assert max(influence) <= INFLUENCE_ABS_MAX, f"influence max diff {max(influence):.4f}"
+    worst = max(influence, key=lambda k: influence[k])
+    assert influence[worst] <= INFLUENCE_ABS_MAX, (
+        f"influence max diff {influence[worst]:.4f} at {worst}: "
+        f"{ref_features[worst]['influence']} on production, {got_features[worst]['influence']} here"
+    )
 
     ref_logits, got_logits = _logits(reference), _logits(got)
     assert max(ref_logits, key=lambda t: ref_logits[t]) == max(
