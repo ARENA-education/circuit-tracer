@@ -37,7 +37,8 @@ jobs:
 
   # tests/test_graph_ground_truth.py on a real GPU: a graph built here, on each backend, against a
   # reference graph built from the same request. The `build` job has no GPU, so there these tests
-  # skip. One runner per transcoder set, all in parallel.
+  # skip. One runner per transcoder set, one at a time: the machine.dev account runs one runner at
+  # once, and a job that waits more than 15 minutes for a slot fails.
   #
   # Runner: machine.dev (https://machine.dev), a managed GPU runner picked with one `runs-on` label,
   # CUDA preinstalled, billed per minute. T4 is the 16 GB card; gemma-2-2b peaks at 9.6 GiB on
@@ -54,6 +55,7 @@ jobs:
   ground-truth:
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         case: [gemma-2-2b-gemmascope-16k, gemma-3-1b-gemmascope2-16k]
     runs-on: machine/gpu=t4/cpu=16/ram=64/tenancy=spot
@@ -104,8 +106,8 @@ jobs:
   # The `requires_disk` sets. Each downloads its transcoders first, which is most of the time:
   # 160 GiB for the CLT, 57 GiB for Qwen3-4B. So they run when a PR opens ready for review (or a
   # draft is marked ready), on merge to main, and on `workflow_dispatch` with ground_truth_sets=all,
-  # not on every push to a PR. They wait for `ground-truth` because machine.dev caps concurrent
-  # runners: four at once left one queued until it gave up.
+  # not on every push to a PR. They wait for `ground-truth`, and for each other, for the one-runner
+  # cap above; the CLT job is 15 minutes, longer than a queued job survives.
   ground-truth-opt-in:
     needs: ground-truth
     if: >-
@@ -115,6 +117,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.ground_truth_sets == 'all')
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           # The CLT fits a 48 GB L40S. Qwen3-4B does not on nnsight, so it gets the 96 GB card.
