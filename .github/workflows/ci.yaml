@@ -11,7 +11,7 @@ on:
       ground_truth_sets:
         description: >-
           Transcoder sets for the ground-truth jobs. "default" is the two gemma-scope sets on 16 GB
-          cards. "all" adds the CLT (160 GiB) and Qwen3-4B (57 GiB) sets, each on its own 48 GB
+          cards. "all" adds the CLT (160 GiB) on a 48 GB card and Qwen3-4B (57 GiB) on a 96 GB
           card; those also run when a PR opens ready for review and on merge to main.
         type: choice
         default: default
@@ -87,18 +87,27 @@ jobs:
           uv venv --python 3.11 .venv
           uv pip install --python .venv/bin/python -e ".[dev]"
 
-      # `-rP` puts each passing test's captured stdout in the summary; the test prints its peak
-      # GPU memory there, so the card can be sized from evidence.
+      # One pytest process per backend: a failed test's traceback keeps its tensors alive, and the
+      # next backend would start on a full card. `-rP` puts each passing test's captured stdout in
+      # the summary; the test prints its peak GPU memory there, so the card can be sized from
+      # evidence.
       - name: Run ground-truth tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: .venv/bin/python -m pytest tests/test_graph_ground_truth.py -k "${{ matrix.case }}" -v -rP --durations=0
+        run: |
+          status=0
+          for backend in transformerlens nnsight interp_engine; do
+            .venv/bin/python -m pytest tests/test_graph_ground_truth.py -k "${{ matrix.case }} and $backend" -v -rP --durations=0 || status=1
+          done
+          exit $status
 
   # The `requires_disk` sets. Each downloads its transcoders first, which is most of the time:
   # 160 GiB for the CLT, 57 GiB for Qwen3-4B. So they run when a PR opens ready for review (or a
   # draft is marked ready), on merge to main, and on `workflow_dispatch` with ground_truth_sets=all,
-  # not on every push to a PR.
+  # not on every push to a PR. They wait for `ground-truth` because machine.dev caps concurrent
+  # runners: four at once left one queued until it gave up.
   ground-truth-opt-in:
+    needs: ground-truth
     if: >-
       github.event_name == 'push'
       || (contains(fromJSON('["opened", "ready_for_review"]'), github.event.action)
@@ -108,13 +117,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The CLT fits a 48 GB L40S. Qwen3-4B does not on nnsight, so it gets the 96 GB card.
           - case: gemma-2-2b-clt-2.5M
-            disk_size: 250
+            runs_on: machine/gpu=l40s/cpu=16/ram=128/disk_size=250/tenancy=spot
             minutes: 180
           - case: qwen3-4b-transcoders
-            disk_size: 150
+            runs_on: machine/gpu=rtx6000/cpu=16/ram=128/disk_size=150/tenancy=spot
             minutes: 90
-    runs-on: machine/gpu=l40s/cpu=16/ram=128/disk_size=${{ matrix.disk_size }}/tenancy=spot
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: ${{ matrix.minutes }}
     concurrency:
       group: ground-truth-${{ matrix.case }}-${{ github.ref }}
@@ -138,4 +148,9 @@ jobs:
       - name: Run ground-truth tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: .venv/bin/python -m pytest tests/test_graph_ground_truth.py -m requires_disk -k "${{ matrix.case }}" -v -rP --durations=0
+        run: |
+          status=0
+          for backend in transformerlens nnsight interp_engine; do
+            .venv/bin/python -m pytest tests/test_graph_ground_truth.py -m requires_disk -k "${{ matrix.case }} and $backend" -v -rP --durations=0 || status=1
+          done
+          exit $status

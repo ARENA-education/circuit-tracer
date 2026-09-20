@@ -27,15 +27,18 @@ The two gemma-scope cases run wherever there is a GPU: 13 GB and 3 GB of downloa
 the gemma-2-2b one peaks at 9.1 GiB on transformerlens and ~7 GiB on the other two, the gemma-3-1b
 one at ~3 GiB, so the CI job runs each on a 16 GB card. The CLT and Qwen cases are
 ``requires_disk``: 160 GiB and 57 GiB of transcoders, and their resident encoders alone are ~11 GiB
-and 28 GiB. Opt in with ``-m requires_disk`` and pick with ``-k``. The self-agreement test at the
-bottom runs everywhere and keeps the fixtures and the comparison honest without weights.
+and 28 GiB. The CLT fits a 48 GB card; Qwen peaks at 39 GiB on transformerlens and past 44 GiB on
+nnsight, so CI gives it a 96 GB card. Opt in with ``-m requires_disk`` and pick with ``-k``. Run
+each backend in its own process: a failed test's traceback keeps its tensors alive, and the next
+backend then starts on a full card. The self-agreement test at the bottom runs everywhere and keeps
+the fixtures and the comparison honest without weights.
 """
 
 import gc
 import json
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -60,8 +63,8 @@ class Case:
     #: Skip on a smaller card. Below the card's nominal size, since ``total_memory`` reports less:
     #: a 16 GB T4 is 14.7 GiB, a 48 GB L40S is 44.5. The default case peaks at 9.1 GiB.
     min_vram_gib: int
-    #: Backends that can load the model. TransformerLens has no Gemma-3 port that matches HF.
-    backends: tuple[Backend, ...] = BACKENDS
+    #: Backends that cannot build this graph, and why.
+    skips: dict[Backend, str] = field(default_factory=dict)
 
 
 CASES = {
@@ -72,10 +75,21 @@ CASES = {
         "123-gemma-3-1b-pt-gemmascope2-16k.json",
         "google/gemma-3-1b-pt",
         6,
-        backends=("nnsight", "interp_engine"),
+        skips={"transformerlens": "TransformerLens has no Gemma-3 port that matches HF"},
     ),
     "gemma-2-2b-clt-2.5M": Case("123-gemma-2-2b-clt-hp.json", "google/gemma-2-2b", 20),
-    "qwen3-4b-transcoders": Case("123-qwen3-4b-transcoder-hp.json", "Qwen/Qwen3-4B", 40),
+    # nnsight peaks past the 44.5 GiB an L40S has, so this case wants the 96 GB card.
+    "qwen3-4b-transcoders": Case(
+        "123-qwen3-4b-transcoder-hp.json",
+        "Qwen/Qwen3-4B",
+        60,
+        skips={
+            "transformerlens": (
+                "Qwen3 has no bos token; TransformerLens prepends <|im_end|> (its eos) where the "
+                "HF backends and production prepend <|endoftext|> (the pad token)"
+            )
+        },
+    ),
 }
 FIXTURE_PARAMS = [pytest.param(case, id=name) for name, case in CASES.items()]
 #: The gemma-scope cases download 3 to 13 GB; the other two need a big disk and card, so they opt in.
@@ -209,8 +223,8 @@ def test_each_fixture_agrees_with_itself(case: Case) -> None:
 @pytest.mark.parametrize("case", CASE_PARAMS)
 def test_a_graph_built_here_agrees_with_production(case: Case, backend: Backend) -> None:
     assert DEVICE is not None
-    if backend not in case.backends:
-        pytest.skip(f"{backend} cannot load {case.model}")
+    if backend in case.skips:
+        pytest.skip(case.skips[backend])
     if DEVICE.type == "cuda":
         total_gib = torch.cuda.get_device_properties(0).total_memory / 2**30
         if total_gib < case.min_vram_gib:
