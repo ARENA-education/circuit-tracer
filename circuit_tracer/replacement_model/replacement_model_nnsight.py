@@ -1,3 +1,4 @@
+import re
 import warnings
 from collections import defaultdict
 from collections.abc import Sequence
@@ -8,8 +9,22 @@ from typing import Callable, Iterator, Literal, cast
 import torch
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from nnsight.intervention.barrier import Barrier
-from nnsight import TransformersModel, Envoy, save, CONFIG as NNSIGHT_CONFIG
+from nnsight import Envoy, save, CONFIG as NNSIGHT_CONFIG
+
+# The imports differ between nnsight versions; pyright only sees the installed one, hence the ignores.
+try:  # nnsight >= 0.8
+    from nnsight import TransformersModel  # pyright: ignore[reportAttributeAccessIssue]
+    from nnsight.intervention.barrier import Barrier  # pyright: ignore[reportMissingImports]
+
+    _NNSIGHT_TASK_KWARGS = {"task": "text-generation"}
+except ImportError:
+    # nnsight 0.7 has no TransformersModel and no `task` argument. As the pre-0.8 version of
+    # this backend did, use LanguageModel and switch off CROSS_INVOKER.
+    from nnsight import LanguageModel as TransformersModel  # pyright: ignore[reportAttributeAccessIssue]
+    from nnsight.intervention.tracing.tracer import Barrier  # pyright: ignore[reportMissingImports]
+
+    _NNSIGHT_TASK_KWARGS = {}
+    NNSIGHT_CONFIG.APP.CROSS_INVOKER = False  # pyright: ignore[reportAttributeAccessIssue]
 
 from circuit_tracer.attribution.context_nnsight import AttributionContext
 from circuit_tracer.transcoder import TranscoderSet
@@ -46,7 +61,7 @@ class EnvoyWrapper:
         setattr(self.envoy, self.input_output, value)
 
 
-class NNSightReplacementModel(TransformersModel):
+class NNSightReplacementModel(TransformersModel):  # pyright: ignore[reportGeneralTypeIssues]
     d_transcoder: int
     transcoders: TranscoderSet | CrossLayerTranscoder
     feature_input_locs: list[nn.Module]  # type: ignore
@@ -83,7 +98,7 @@ class NNSightReplacementModel(TransformersModel):
         model = cls(
             hf_model,
             tokenizer=hf_tokenizer,
-            task="text-generation",
+            **_NNSIGHT_TASK_KWARGS,
             dispatch=True,
             **kwargs,
         )
@@ -142,7 +157,7 @@ class NNSightReplacementModel(TransformersModel):
 
         super(cls, model).__init__(
             model_name,
-            task="text-generation",
+            **_NNSIGHT_TASK_KWARGS,
             config=config,
             device_map=device_map,
             dispatch=True,
@@ -1016,7 +1031,32 @@ class NNSightReplacementModel(TransformersModel):
     def attention_locs(self) -> Iterator[nn.Module]:
         """Dynamically resolve the attention pattern hook locations for every layer."""
         for layer in range(self.cfg.n_layers):  # type: ignore
-            yield self._resolve_attr(self, self._attention_pattern.format(layer=layer))  # type: ignore
+            yield self._resolve_attention_loc(layer)  # type: ignore
+
+    def _resolve_attention_loc(self, layer: int):
+        """Resolves the attention pattern location for one layer.
+
+        The pattern addresses the call to the attention function inside the attention module's
+        forward source by its index, e.g. `attention_interface_2`. nnsight numbers every use of
+        that name in the source, so the index of the call differs between transformers versions
+        (with transformers 5.17 it is `attention_interface_0`). If the configured index doesn't
+        exist, use the highest-numbered `attention_interface_N` for which the rest of the pattern
+        (the attention-weights dropout op) resolves; the call is the last use of the name.
+        """
+        pattern = self._attention_pattern.format(layer=layer)
+        try:
+            return self._resolve_attr(self, pattern)
+        except AttributeError:
+            if "attention_interface_" not in pattern:
+                raise
+        for idx in range(4, -1, -1):
+            try:
+                return self._resolve_attr(
+                    self, re.sub(r"attention_interface_\d+", f"attention_interface_{idx}", pattern)
+                )
+            except AttributeError:
+                continue
+        return self._resolve_attr(self, pattern)  # re-raise the original error
 
     @property
     def layernorm_scale_locs(self) -> list[Iterator[nn.Module]]:

@@ -10,7 +10,11 @@ from urllib.parse import parse_qs, urlparse
 import torch
 import yaml
 from huggingface_hub import get_token, hf_api, hf_hub_download, snapshot_download
-from huggingface_hub.constants import HF_HUB_ENABLE_HF_TRANSFER
+
+try:  # huggingface_hub < 1.0
+    from huggingface_hub.constants import HF_HUB_ENABLE_HF_TRANSFER  # pyright: ignore[reportAttributeAccessIssue]
+except ImportError:  # removed in huggingface_hub 1.0, which replaced hf_transfer with hf_xet
+    HF_HUB_ENABLE_HF_TRANSFER = False
 from huggingface_hub.utils.tqdm import tqdm as hf_tqdm
 from tqdm.contrib.concurrent import thread_map
 

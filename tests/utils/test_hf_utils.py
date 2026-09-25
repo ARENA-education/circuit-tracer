@@ -69,7 +69,9 @@ class TestHfUtilsDownload(unittest.TestCase):
         # Setup: Pre-flight check passes, as repo_info just returns metadata.
         mock_repo_info.return_value = mock.MagicMock(private=False, gated=True)
         # Setup: The download itself will fail.
-        mock_download.side_effect = GatedRepoError("User has not accepted terms.")
+        mock_download.side_effect = GatedRepoError(
+            "User has not accepted terms.", response=mock.MagicMock()
+        )
 
         # Execute & Assert: Check that the GatedRepoError is raised by the function.
         with self.assertRaises(GatedRepoError):
@@ -99,13 +101,32 @@ class TestHfUtilsDownload(unittest.TestCase):
         """Tests a private repo the user can't see, or a repo that doesn't exist.
         Pre-flight check fails and error is propagated
         """
-        mock_repo_info.side_effect = RepositoryNotFoundError("Repo not found.")
+        mock_repo_info.side_effect = RepositoryNotFoundError(
+            "Repo not found.", response=mock.MagicMock()
+        )
 
         with self.assertRaises(RepositoryNotFoundError):
             download_hf_uris([TEST_URI])
 
         # download is not called, as the repo is not found
         mock_download.assert_not_called()
+
+
+def test_import_without_hf_transfer_constant(monkeypatch):
+    """huggingface_hub 1.0 removed HF_HUB_ENABLE_HF_TRANSFER; hf_utils must still import."""
+    import importlib
+
+    import huggingface_hub.constants
+
+    import circuit_tracer.utils.hf_utils as hf_utils
+
+    monkeypatch.delattr(huggingface_hub.constants, "HF_HUB_ENABLE_HF_TRANSFER", raising=False)
+    try:
+        importlib.reload(hf_utils)
+        assert hf_utils.HF_HUB_ENABLE_HF_TRANSFER is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(hf_utils)
 
 
 if __name__ == "__main__":
