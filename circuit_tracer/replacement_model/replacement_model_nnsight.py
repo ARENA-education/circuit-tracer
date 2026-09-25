@@ -1,3 +1,4 @@
+import re
 import warnings
 from collections import defaultdict
 from collections.abc import Sequence
@@ -8,8 +9,19 @@ from typing import Callable, Iterator, Literal, cast
 import torch
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from nnsight.intervention.barrier import Barrier
-from nnsight import TransformersModel, Envoy, save, CONFIG as NNSIGHT_CONFIG
+from nnsight import Envoy, save, CONFIG as NNSIGHT_CONFIG
+
+try:  # nnsight >= 0.8
+    from nnsight import TransformersModel
+    from nnsight.intervention.barrier import Barrier
+
+    _NNSIGHT_TASK_KWARGS = {"task": "text-generation"}
+except ImportError:  # nnsight 0.7: the pre-0.8 version of this backend used LanguageModel, and switched off CROSS_INVOKER
+    from nnsight import LanguageModel as TransformersModel
+    from nnsight.intervention.tracing.tracer import Barrier
+
+    _NNSIGHT_TASK_KWARGS = {}
+    NNSIGHT_CONFIG.APP.CROSS_INVOKER = False
 
 from circuit_tracer.attribution.context_nnsight import AttributionContext
 from circuit_tracer.transcoder import TranscoderSet
@@ -83,7 +95,7 @@ class NNSightReplacementModel(TransformersModel):
         model = cls(
             hf_model,
             tokenizer=hf_tokenizer,
-            task="text-generation",
+            **_NNSIGHT_TASK_KWARGS,
             dispatch=True,
             **kwargs,
         )
@@ -142,7 +154,7 @@ class NNSightReplacementModel(TransformersModel):
 
         super(cls, model).__init__(
             model_name,
-            task="text-generation",
+            **_NNSIGHT_TASK_KWARGS,
             config=config,
             device_map=device_map,
             dispatch=True,
@@ -1016,7 +1028,28 @@ class NNSightReplacementModel(TransformersModel):
     def attention_locs(self) -> Iterator[nn.Module]:
         """Dynamically resolve the attention pattern hook locations for every layer."""
         for layer in range(self.cfg.n_layers):  # type: ignore
-            yield self._resolve_attr(self, self._attention_pattern.format(layer=layer))  # type: ignore
+            yield self._resolve_attention_loc(layer)
+
+    def _resolve_attention_loc(self, layer: int):
+        """Resolves the attention pattern location for one layer.
+
+        The pattern addresses the call to the attention function inside the attention module's forward source, e.g.
+        `attention_interface_2`. The index depends on how many times that name appears in the source before the call,
+        which differs between transformers (and nnsight) versions, so if the configured index doesn't exist we use the
+        last `attention_interface_N` which has the attention-weights dropout op inside it (the call comes last).
+        """
+        pattern = self._attention_pattern.format(layer=layer)
+        try:
+            return self._resolve_attr(self, pattern)
+        except AttributeError:
+            if "attention_interface_" not in pattern:
+                raise
+        for idx in range(4, -1, -1):
+            try:
+                return self._resolve_attr(self, re.sub(r"attention_interface_\d+", f"attention_interface_{idx}", pattern))
+            except AttributeError:
+                continue
+        return self._resolve_attr(self, pattern)  # re-raise the original error
 
     @property
     def layernorm_scale_locs(self) -> list[Iterator[nn.Module]]:
