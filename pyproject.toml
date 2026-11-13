@@ -5,7 +5,7 @@ description = "Library for circuit tracing in language models"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "einops>=0.8.0",
+    "einops>=0.7",
     "huggingface_hub",
     "ipykernel>=6.29.5",
     "ipywidgets",
